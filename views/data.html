@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Data</title>
+    <link rel="stylesheet" href="/public/styles.css"/>
+</head>
+<body>
+<div class="card">
+    <h1>Data</h1>
+
+    <div class="row">
+        <input id="key" placeholder="key" />
+        <input id="value" placeholder="value" />
+        <button class="btn" onclick="addKV()">POST</button>
+    </div>
+
+    <div class="row">
+        <input id="delKey" placeholder="key to delete" />
+        <button class="btn danger" onclick="delKV()">DELETE</button>
+    </div>
+
+    <div class="row">
+        <button class="btn" onclick="loadData()">GET</button>
+        <a class="btn" href="/">Home</a>
+    </div>
+
+    <pre id="out"></pre>
+</div>
+
+<script src="/public/app.js"></script>
+
+</body>
+</html>

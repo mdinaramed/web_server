@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,97 +27,110 @@ func NewServer() *Server {
 }
 
 func (s *Server) incRequests() {
-	s.mu.Lock()
 	s.requests++
-	s.mu.Unlock()
 }
 
-// Handle POST /data
 func (s *Server) postDataHandler(w http.ResponseWriter, r *http.Request) {
-	s.incRequests()
-
-	var payload map[string]string
-	err := json.NewDecoder(r.Body).Decode(&payload)
-	if err != nil {
-		http.Error(w, "failed json", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
 	s.mu.Lock()
 	for k, v := range payload {
 		s.data[k] = v
 	}
+	s.incRequests()
 	s.mu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// Handle GET /data
 func (s *Server) getDataHandler(w http.ResponseWriter, r *http.Request) {
-	s.incRequests()
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	s.mu.Lock()
+	s.incRequests()
 	copyData := make(map[string]string)
 	for k, v := range s.data {
 		copyData[k] = v
 	}
 	s.mu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(copyData)
 }
 
-// Handle DELETE /data/{key}
 func (s *Server) deleteDataHandler(w http.ResponseWriter, r *http.Request) {
-	s.incRequests()
-
-	key := r.PathValue("key")
-	if key == "" {
-		http.Error(w, "missing key", http.StatusNotFound)
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 4 || parts[3] == "" {
+		http.Error(w, "Key not specified", http.StatusBadRequest)
+		return
+	}
+	key := parts[3]
+
 	s.mu.Lock()
-	_, exists := s.data[key]
-	if exists {
+	s.incRequests()
+	_, ok := s.data[key]
+	if ok {
 		delete(s.data, key)
 	}
 	s.mu.Unlock()
-	if !exists {
-		http.Error(w, "key not found", http.StatusNotFound)
+
+	if !ok {
+		http.Error(w, "Key not found", http.StatusNotFound)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"deleted": key})
 }
 
-// Handle GET /stats
 func (s *Server) statsHandler(w http.ResponseWriter, r *http.Request) {
-	s.incRequests()
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	s.mu.Lock()
-	req := s.requests
-	size := len(s.data)
+	s.incRequests()
+	stats := map[string]int{
+		"total_requests": s.requests,
+		"db_size":        len(s.data),
+	}
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{
-		"requests": req,
-		"db_size":  size,
-	})
+	json.NewEncoder(w).Encode(stats)
 }
 
-// Background worker to log server status
 func (s *Server) startBackgroundWorker() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
 			s.mu.Lock()
-			req := s.requests
-			size := len(s.data)
+			fmt.Printf("Current Requests: %d, Database size: %d\n", s.requests, len(s.data))
 			s.mu.Unlock()
-			fmt.Printf("Current requests: %d, Database size: %d\n", req, size)
 		case <-s.shutdownCh:
-			fmt.Println("Worker stopped")
+			fmt.Println("Worker Stopped")
 			return
 		}
 	}
@@ -124,35 +138,61 @@ func (s *Server) startBackgroundWorker() {
 
 func main() {
 	server := NewServer()
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /data", server.postDataHandler)
-	mux.HandleFunc("GET /data", server.getDataHandler)
-	mux.HandleFunc("DELETE /data/{key}", server.deleteDataHandler)
-	mux.HandleFunc("GET /stats", server.statsHandler)
 
-	httpServer := &http.Server{
+	mux.Handle("/public/", http.StripPrefix("/public/", http.FileServer(http.Dir("public"))))
+
+	mux.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			server.postDataHandler(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			server.getDataHandler(w, r)
+			return
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/api/data/", server.deleteDataHandler)
+	mux.HandleFunc("/api/stats", server.statsHandler)
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/index":
+			http.ServeFile(w, r, "views/index.html")
+		case "/data":
+			http.ServeFile(w, r, "views/data.html")
+		case "/stats":
+			http.ServeFile(w, r, "views/stats.html")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
 
 	go server.startBackgroundWorker()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 
 	go func() {
-		<-stop
-		fmt.Println("\nShutting down server...")
-		close(server.shutdownCh)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(ctx)
+		fmt.Println("Server started at http://localhost:8080")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Println("Server error:", err)
+		}
 	}()
 
-	fmt.Println("Server starting on :8080")
-	err := httpServer.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
-		fmt.Println("Server error:", err)
-	}
-	fmt.Println("Server stopped")
+	<-stop
+	fmt.Println("\nShutting down server...")
+	close(server.shutdownCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+
+	fmt.Println("Server exited properly")
 }
